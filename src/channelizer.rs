@@ -24,9 +24,10 @@ pub struct Channelizer {
 
     #[doc(hidden)]
     int_work_buffer: Vec<Complex<i32>>,
-
+    // len(int_work_buffer) == num_channels
     #[doc(hidden)]
     float_work_buffer: Vec<Complex<f32>>,
+    // len(float_work_buffer) == num_channels
 }
 
 impl Channelizer {
@@ -245,13 +246,15 @@ pub struct SlidingWindow {
     pub len: usize,
     pub offset: usize,
 
+    // TODO: add cache flag
+
     // TODO: use Vec<Complex<i16>> instead of Vec<i16>
     pub r: Vec<i32>,
     pub i: Vec<i32>,
 }
 
 impl SlidingWindow {
-    pub(crate) fn new(len: usize) -> Self {
+    pub fn new(len: usize) -> Self {
         assert!(len.is_power_of_two());
 
         let offset = 2 * len;
@@ -265,7 +268,7 @@ impl SlidingWindow {
         }
     }
 
-    pub(crate) fn push(&mut self, data: Complex<i8>) {
+    pub fn push(&mut self, data: Complex<i8>) {
         let Complex { re, im } = data;
 
         self.current_pos += 1;
@@ -277,11 +280,18 @@ impl SlidingWindow {
         }
 
         let write_pos = self.current_pos + self.len - 1; // TODO: remove overflow check
-        self.r[write_pos] = re as i32;
-        self.i[write_pos] = im as i32;
+
+        // self.r[write_pos] = re as i32;
+        // self.i[write_pos] = im as i32;
+
+        // remove bounds check
+        unsafe {
+            *self.r.get_unchecked_mut(write_pos) = re as i32;
+            *self.i.get_unchecked_mut(write_pos) = im as i32;
+        }
     }
 
-    pub(crate) fn apply_filter(&self, filter: &[i32]) -> Complex<i32> {
+    pub fn apply_filter(&self, filter: &[i32]) -> Complex<i32> {
         debug_assert_eq!(filter.len(), self.len);
 
         debug_assert_eq!(self.len, 8); // FIXME: remove this constraint
@@ -306,7 +316,7 @@ impl SlidingWindow {
         Complex::new(out[0] >> 8, out[1] >> 8) // due to sdr's signal format
     }
 
-    pub(crate) fn apply_filter_float(&self, filter: &[i32]) -> Complex<f32> {
+    pub fn apply_filter_float(&self, filter: &[i32]) -> Complex<f32> {
         debug_assert_eq!(filter.len(), self.len);
         debug_assert_eq!(self.len, 8); // FIXME: remove this constraint
 
@@ -349,7 +359,66 @@ fn generate_kaiser(channel: usize, m: usize, lp_cutoff: f32) -> Vec<f32> {
     buffer
 }
 
-pub struct Synthesizer {}
+pub struct Synthesizer {
+    num_channels: usize,
+
+    fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
+
+    #[doc(hidden)]
+    channel_half: usize,
+
+    #[doc(hidden)]
+    flag: bool,
+}
+
+impl Synthesizer {
+    pub fn new(num_channels: usize) -> Self {
+        let fft = rustfft::FftPlanner::new().plan_fft_inverse(num_channels);
+        let channel_half = num_channels / 2;
+
+        Self {
+            num_channels,
+            fft,
+            channel_half,
+            flag: false,
+        }
+    }
+
+    // [Complex<f32>; channel_half] -> [Complex<i8>; channel_half]
+    pub fn synthesize(&mut self, input: &[Complex<f32>]) -> Vec<Complex<i8>> {
+        debug_assert_eq!(input.len(), self.channel_half);
+
+        input
+            .iter()
+            .map(|v| Complex {
+                // re: (v.re * 32768.0) as i8,
+                // im: (v.im * 32768.0) as i8,
+                // re: (v.re * 256.0) as i8,
+                // im: (v.im * 256.0) as i8,
+            })
+            .collect()
+    }
+
+    // [Complex<f32>; num_channels] -> [Complex<i8>; channel_half]
+    pub fn ifft_synthesize(&mut self, input: &[Complex<f32>]) -> Vec<Complex<i8>> {
+        debug_assert_eq!(input.len(), self.num_channels);
+
+        let mut output = input.to_vec();
+        self.fft.process(&mut output);
+
+        println!("output = {:?}", output);
+
+        let output = if self.flag {
+            output[..self.channel_half].to_vec()
+        } else {
+            output[self.channel_half..].to_vec()
+        };
+
+        self.flag = !self.flag;
+
+        self.synthesize(&output)
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -460,20 +529,35 @@ mod test {
     }
 
     #[test]
-    fn uptest_channelizer() {
+    fn uptest_channelize_then_synthesize() {
         let channel = 20;
         let m = 4;
         let lp_cutoff = 0.75;
 
         let mut rng = rand::rngs::SmallRng::seed_from_u64(0);
-        let data: Vec<Complex<i8>> = (0..10)
-            .map(|_| Complex::new(rng.gen(), rng.gen()))
+        let data: Vec<Complex<i8>> = (0..channel * 100)
+            .map(|_| Complex::new(rng.gen_range(-10..10), rng.gen_range(-10..10)))
             .collect::<Vec<_>>();
 
-        let mut magic = Channelizer::new(channel, m, lp_cutoff);
+        let mut channelizer = Channelizer::new(channel, m, lp_cutoff);
+        let mut synthesizer = Synthesizer::new(20);
 
-        let got = magic.channelize_fft(&data);
-        panic!("{:?}", got);
+        for chunk in data.chunks(channel / 2) {
+            let chan = channelizer.channelize_fft(chunk);
+            let synt = synthesizer.ifft_synthesize(chan);
+            print!("chunk = [");
+            for i in 0..4 {
+                print!("{:4}+{:4}i,", chunk[i].re, chunk[i].im);
+            }
+            println!("]");
+            print!("synt =  [");
+            for i in 0..4 {
+                print!("{:4}+{:4}i,", synt[i].re, synt[i].im);
+            }
+            println!("]\n");
+        }
+
+        panic!();
     }
 
     extern crate test;
