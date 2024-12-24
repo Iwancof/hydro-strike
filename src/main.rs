@@ -36,7 +36,7 @@ fn main() -> anyhow::Result<()> {
     std::env::set_var(
         "SOAPY_SDR_PLUGIN_PATH",
         // "/home/iwancof/Nextcloud/SecHack365/HackRF/soapy-virtual/build",
-        "/home/iwancof/Nextcloud/SecHack365/HackRF/soapy-file/build",
+        "/home/iwancof/Nextcloud/SecHack365/HackRF/soapy-utils/soapy-file/build",
     );
 
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
@@ -59,7 +59,7 @@ fn main() -> anyhow::Result<()> {
         .into_iter()
         .next()
         .context("No devices found")?;
-    devarg.set("path", "/tmp/out.txt");
+    devarg.set("path", "./sample.txt");
 
     log::trace!("found device {}", devarg);
 
